@@ -18,28 +18,36 @@ var version = "1.0.0"
 var fileMutex sync.Mutex
 
 type RequestBody struct {
-	Category    string                 `json:"category"`
-	SubCategory string                 `json:"subCategory"`
-	Page        int                    `json:"page"`
-	Filters     map[string]interface{} `json:"filters"`
+	Q               string        `json:"q"`
+	Filters         []interface{} `json:"filters"`
+	LegacyLibFilter bool          `json:"legacyLibFilter"`
+	MainLibFilter   bool          `json:"mainLibFilter"`
+	AnyFilters      []interface{} `json:"anyFilters"`
+	Sort            string        `json:"sort"`
+	SortDirection   int           `json:"sortDirection"`
+	Size            int           `json:"size"`
+	Skip            int           `json:"skip"`
 }
 
-func createRequestBody(videoIDs []int) (*RequestBody, error) {
+func createRequestBody(chunkSize, offset int) (*RequestBody, error) {
 	return &RequestBody{
-		Category:    "all",
-		SubCategory: "all",
-		Page:        1,
-		Filters: map[string]interface{}{
-			"maxResults":   1,
-			"collectionId": videoIDs,
-		},
+		Q:               "",
+		Filters:         []interface{}{},
+		LegacyLibFilter: true,
+		MainLibFilter:   true,
+		AnyFilters:      []interface{}{},
+		Sort:            "",
+		SortDirection:   1,
+		Size:            chunkSize,
+		Skip:            offset,
 	}, nil
 }
 
-func sendPostRequest(videoIDs []int, client *warc.CustomHTTPClient, wg *sync.WaitGroup, responseCh chan<- string) {
+func sendPostRequest(chunkSize int, offset int, client *warc.CustomHTTPClient, wg *sync.WaitGroup, responseCh chan<- string) {
 	defer wg.Done()
+	fmt.Println("Offset:", offset)
 
-	body, err := createRequestBody(videoIDs)
+	body, err := createRequestBody(chunkSize, offset)
 	if err != nil {
 		fmt.Println("Error creating request body:", err)
 		return
@@ -51,7 +59,7 @@ func sendPostRequest(videoIDs []int, client *warc.CustomHTTPClient, wg *sync.Wai
 		return
 	}
 
-	req, err := http.NewRequest("POST", "https://veoh.com/list/category/collections", bytes.NewBuffer(jsonData))
+	req, err := http.NewRequest("POST", "https://adams-search.nrc.gov/api/search", bytes.NewBuffer(jsonData))
 	if err != nil {
 		fmt.Println("Error creating request:", err)
 		return
@@ -80,13 +88,17 @@ func sendPostRequest(videoIDs []int, client *warc.CustomHTTPClient, wg *sync.Wai
 
 	// Add this struct to parse the response body
 	var response struct {
-		Success     bool `json:"success"`
+		Count   int `json:"count"`
+		Results []struct {
+			Document []struct {
+				URL string `json:"Url"`
+			}
+		} `json:"results"`
 		Collections []struct {
 			PermalinkId string `json:"permalinkId"`
 		} `json:"collections"`
 	}
 
-	// Add this code to parse the response body and write permalinkIds to permalinks.txt
 	if len(respBody) == 0 {
 		fmt.Println("Error: response body is empty")
 		return
@@ -97,7 +109,7 @@ func sendPostRequest(videoIDs []int, client *warc.CustomHTTPClient, wg *sync.Wai
 		return
 	}
 
-	permalinkFile, err := os.OpenFile("permalinks.txt", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	permalinkFile, err := os.OpenFile("discovered.txt", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		fmt.Println("Error opening file:", err)
 		return
@@ -106,20 +118,6 @@ func sendPostRequest(videoIDs []int, client *warc.CustomHTTPClient, wg *sync.Wai
 
 	for _, collection := range response.Collections {
 		if _, err := permalinkFile.WriteString(fmt.Sprintf("%s\n", collection.PermalinkId)); err != nil {
-			fmt.Println("Error writing to file:", err)
-			return
-		}
-	}
-
-	file, err := os.OpenFile("checked.txt", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		fmt.Println("Error opening file:", err)
-		return
-	}
-	defer file.Close()
-
-	for _, id := range videoIDs {
-		if _, err := file.WriteString(fmt.Sprintf("%d\n", id)); err != nil {
 			fmt.Println("Error writing to file:", err)
 			return
 		}
@@ -147,7 +145,7 @@ func main() {
 	rotatorSettings.OutputDirectory = path.Join(".", "warcs")
 	rotatorSettings.Compression = "ZSTD"
 	rotatorSettings.Prefix = "veoh-bruteforcer"
-	rotatorSettings.WarcinfoContent.Set("software", fmt.Sprintf("veoh-bruteforcer/%s", version))
+	rotatorSettings.WarcinfoContent.Set("software", fmt.Sprintf("bruteforcer/adams-search.nrc.gov/%s", version))
 	rotatorSettings.WARCWriterPoolSize = 1
 	rotatorSettings.WarcSize = float64(15360)
 	rotatorSettings.WarcinfoContent.Set("operator", "DigitalDragon <warc@digitaldragon.dev>")
@@ -175,29 +173,17 @@ func main() {
 	}
 	print("done!")
 
-	idRange := *end - *start + 1
-	numRequests := (idRange + *chunks - 1) / *chunks
 	var wg sync.WaitGroup
-	responseCh := make(chan string, numRequests)
+	responseCh := make(chan string, (*end-*start)/(*chunks))
 	sem := make(chan struct{}, *threads)
 
-	for i := 0; i < numRequests; i++ {
-		startID := *start + i**chunks
-		endID := startID + *chunks
-		if endID > *end {
-			endID = *end + 1
-		}
-		videoIDs := make([]int, endID-startID)
-		for j := range videoIDs {
-			videoIDs[j] = startID + j
-		}
-
+	for i := 0; i < *end; i += *chunks {
 		wg.Add(1)
 		sem <- struct{}{} // Limit the number of concurrent requests
-		go func(ids []int) {
+		go func(offset int) {
 			defer func() { <-sem }()
-			sendPostRequest(ids, client, &wg, responseCh)
-		}(videoIDs)
+			sendPostRequest(*chunks, offset, client, &wg, responseCh)
+		}(i)
 	}
 
 	go func() {
@@ -207,9 +193,9 @@ func main() {
 
 	done := make(chan struct{})
 	go func() {
-		for resp := range responseCh {
+		/*for resp := range responseCh {
 			fmt.Println("Response:", resp)
-		}
+		}*/
 		close(done)
 	}()
 
