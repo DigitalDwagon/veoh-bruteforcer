@@ -90,13 +90,16 @@ func sendPostRequest(chunkSize int, offset int, client *warc.CustomHTTPClient, w
 	var response struct {
 		Count   int `json:"count"`
 		Results []struct {
-			Document []struct {
+			Document struct {
 				URL string `json:"Url"`
-			}
+			} `json:"document"`
 		} `json:"results"`
-		Collections []struct {
-			PermalinkId string `json:"permalinkId"`
-		} `json:"collections"`
+		Facets struct {
+			Keyword []struct {
+				Value string `json:"value"`
+				Count int    `json:"count"`
+			} `json:"Keyword"`
+		} `json:"facets"`
 	}
 
 	if len(respBody) == 0 {
@@ -116,8 +119,8 @@ func sendPostRequest(chunkSize int, offset int, client *warc.CustomHTTPClient, w
 	}
 	defer permalinkFile.Close()
 
-	for _, collection := range response.Collections {
-		if _, err := permalinkFile.WriteString(fmt.Sprintf("%s\n", collection.PermalinkId)); err != nil {
+	for _, result := range response.Results {
+		if _, err := permalinkFile.WriteString(fmt.Sprintf("%s\n", result.Document.URL)); err != nil {
 			fmt.Println("Error writing to file:", err)
 			return
 		}
