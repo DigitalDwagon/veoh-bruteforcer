@@ -14,7 +14,7 @@ import (
 	"sync"
 )
 
-var version = "1.0.2"
+var version = "1.0.3"
 var fileMutex sync.Mutex
 
 type RequestBody struct {
@@ -174,13 +174,19 @@ func main() {
 	if err != nil {
 		log.Fatal("Failed to start warc client!", err)
 	}
+	defer func(client *warc.CustomHTTPClient) {
+		err := client.Close()
+		if err != nil {
+			log.Fatal("Failed to close warc client!", err.Error())
+		}
+	}(client)
 	print("done!")
 
 	var wg sync.WaitGroup
 	responseCh := make(chan string, (*end-*start)/(*chunks))
 	sem := make(chan struct{}, *threads)
 
-	for i := 0; i < *end; i += *chunks {
+	for i := *start; i < *end; i += *chunks {
 		wg.Add(1)
 		sem <- struct{}{} // Limit the number of concurrent requests
 		go func(offset int) {
@@ -204,6 +210,5 @@ func main() {
 
 	<-done // Wait for the response processing to complete
 	fmt.Println("All requests done!")
-	client.Close()
 
 }
